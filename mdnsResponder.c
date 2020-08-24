@@ -27,6 +27,7 @@
 #include "mDNSEmbeddedAPI.h" // Defines the interface to the client layer above
 #include "mDNSPosix.h"      // Defines the specific types needed to run mDNS on this platform
 #include "mDNSUNP.h"        // For daemon()
+#include "yi_mdns.h"
 
 #define MDNS_PORT_NUMBER 577
 #define MDNS_OPEN_TIMEOUT (10*60*10) //10 min
@@ -39,6 +40,7 @@
 #define MULTICAST_YIFLAG "XIAOYI"
 #define HD_VER_N10 22
 /* #define IP_ADD_MEMBERSHIP 12 */
+/* #define USE_THREAD */ 
 #ifndef MIN
     #define MIN(x,y) ((x)<(y)?(x):(y))
 #endif
@@ -89,6 +91,8 @@ int gServiceID;
 
 struct MdnsContext{
     mDNSBool gMdnsRunning;
+    dns_callback gCB;
+    char *bind_key;
     char pseude_did[64];
     char did[64];
     char ip[32];
@@ -237,6 +241,7 @@ static mStatus RegisterOneService(const char *  richTextName,
     status = mStatus_NoError;
     thisServ = (PosixService *) malloc(sizeof(*thisServ));
     if (thisServ == NULL) {
+        printf("no memory\r\n"); 
         status = mStatus_NoMemoryErr;
     }
     if (status == mStatus_NoError) {
@@ -250,6 +255,7 @@ static mStatus RegisterOneService(const char *  richTextName,
                                       NULL, 0,      // Subtypes
                                       mDNSInterface_Any, // Interface ID
                                       RegistrationCallback, thisServ, 0); // Callback, context, flags
+
     }
     if (status == mStatus_NoError) {
         thisServ->serviceID = gServiceID;
@@ -284,6 +290,66 @@ static void DeregisterOurServices(void)
     }
 }
 
+static int system_cmd_withret_timeout(char* cmd, char* buf, int length, int timeout)
+{
+    FILE* pfd = NULL;
+    int len=0;
+    fd_set fdset;
+    struct timeval tv;
+    int fd = -1;
+    int ret = -1;
+    int retval = 0;
+    if(NULL==cmd || NULL==buf)
+    {
+        return -1;
+    }
+    pfd = popen(cmd, "r");
+    if(NULL != pfd)
+    {                                                                                                               
+        fd = fileno(pfd);
+        if(fd >= 0)
+        {
+            while(1)
+            {
+                FD_ZERO(&fdset);
+                FD_SET(fd, &fdset);
+                tv.tv_sec = timeout;
+                tv.tv_usec = 0;
+                if(timeout <= 0)
+                {
+                    ret= select(1+fd,&fdset,0,0,NULL);
+                }
+                else
+                {
+                    ret= select(1+fd,&fdset,0,0,&tv);
+                }
+                if(ret <= 0)
+                {
+                    retval = -1;
+                }
+                else
+                {
+                    if(FD_ISSET(fd,&fdset))
+                    {
+                        len = fread(buf, sizeof(char), length-1, pfd);
+                        *(buf+len) = 0;
+                        retval = len;
+
+                    }
+                    (void)pclose(pfd);
+                }
+                break;
+            }
+        }
+    }       
+    else    
+    {   
+        retval = -3;
+    }       
+    return retval;
+}       
+
+
 void * run_recv_data(void * arg)
 {
     int socket_fd = -1,  connect_fd = -1;
@@ -295,7 +361,11 @@ void * run_recv_data(void * arg)
     int on = 1;
     struct ifreq ifr={};
     struct MdnsContext * context = (struct MdnsContext *)arg;
+
+#ifdef USE_THREAD
     pthread_detach(pthread_self());
+#endif
+
     socket_fd = socket(AF_INET, SOCK_STREAM, 0);
     if(socket_fd < 0)goto EXIT_STAT_1;
     if((setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on))) < 0)goto EXIT_STAT_1;
@@ -323,6 +393,11 @@ void * run_recv_data(void * arg)
             {
                 char bindkey[32] = {0};
                 strncpy(bindkey, buff+7, sizeof(bindkey)-7);
+                if(context->gCB && context->bind_key){
+                    strncpy(context->bind_key, buff+7, sizeof(bindkey)-7);
+                    context->gCB(context->bind_key);
+                }
+                /* goto EXIT_STAT_1; */
             }
             else
             {
@@ -338,17 +413,29 @@ void * run_recv_data(void * arg)
             goto CONTINUE_STAT_1;
         }
         int self_timeout = 0;
-        while(self_timeout < MDNS_DEV_BIND_TIMEOUT*10)
+        mdns_bind_state = BIND_STATE_IDLE;
+        printf("wait for bind_state\r\n");
+        while(self_timeout < MDNS_DEV_BIND_TIMEOUT)
         {
-            if(mdns_bind_state != BIND_STATE_IDLE)break;
+            char bind_state[32];
+            system_cmd_withret_timeout("cat /tmp/bind_state", bind_state, sizeof(bind_state), 10);
+            if(strlen(bind_state) &&  atoi(bind_state) != BIND_STATE_IDLE)
+            {
+                mdns_bind_state = atoi(bind_state);
+                printf("mdns_bind_state :%d\r\n",bind_state);
+                break;
+            }
+            else 
+                mdns_bind_state = BIND_STATE_IDLE;
+
             self_timeout++;
-            usleep(1000*100);
+            usleep(1000*1000);
         }
-        if(MDNS_DEV_BIND_TIMEOUT*10 == self_timeout)
+        if(MDNS_DEV_BIND_TIMEOUT == self_timeout)
         {
             bind_result = BIND_DEVICE_TIMEOUT;
             send(connect_fd, (char *)&bind_result, sizeof(bind_result), 0);
-            goto CONTINUE_STAT_1;
+            /* goto CONTINUE_STAT_1; */
         }
         printf( "bind state = %d\r\n", mdns_bind_state);
         if(BIND_STATE_YES_E == mdns_bind_state)
@@ -365,6 +452,7 @@ void * run_recv_data(void * arg)
             bind_result = BIND_NETWORK_TIMEOUT;
             send(connect_fd, (char *)&bind_result, sizeof(bind_result), 0);
             mdns_bind_state = BIND_STATE_IDLE;
+            sleep(1);
             goto CONTINUE_STAT_1;
         }
         else if(BIND_STATE_FAIL == mdns_bind_state)
@@ -373,6 +461,7 @@ void * run_recv_data(void * arg)
             bind_result = BIND_FAIL;
             send(connect_fd, (char *)&bind_result, sizeof(bind_result), 0);
             mdns_bind_state = BIND_STATE_IDLE;
+            sleep(1);
             goto CONTINUE_STAT_1;
         }
 CONTINUE_STAT_1:
@@ -403,7 +492,10 @@ void * run_accept_multicast(void * arg)
     int flag_len = strlen(MULTICAST_YIFLAG);
     struct MdnsContext * context = (struct MdnsContext *)arg;
 
+#ifdef USE_THREAD
     pthread_detach(pthread_self());
+#endif
+
     memset( &srv, 0, sizeof(struct sockaddr_in) );
     memset( &cli, 0, sizeof(struct sockaddr_in) );
     memset( &dst, 0, sizeof(struct sockaddr_in) );
@@ -476,7 +568,7 @@ EXIT_STAT_1:
     return NULL;
 }
 
-void *YI_ETH_MDNS_INIT(const char * ip,const char * pseude_did,const char * did,int HD_VER)
+void *YI_ETH_MDNS_INIT(const char * ip,const char * pseude_did,const char * did,int HD_VER,dns_callback cb,char * bind_key)
 {
 
     struct MdnsContext * context = NULL;
@@ -515,18 +607,15 @@ void *YI_ETH_MDNS_INIT(const char * ip,const char * pseude_did,const char * did,
     memcpy(context->pseude_did,pseude_did,strlen(pseude_did));
     memcpy(context->did,did,strlen(did));
     memcpy(context->ip,ip,strlen(ip));
+    context->gCB = cb;
+    context->bind_key = bind_key;
 EXIT:
+    printf("YI_ETH_MDNS_INIT ok\r\n");
     return context;
 }
 
 void YI_ETH_MDNS_RUN(void * arg){
-#if 0
-    int ret = 0;
-    ret = run_accept_multicast(arg);
-    if(!ret){
-        run_recv_data(arg);
-    }
-#else
+#ifdef USE_THREAD
     pthread_t multicast_t;
     pthread_t recv_t;
     pthread_create(&recv_t,NULL,run_recv_data,arg);
@@ -534,6 +623,11 @@ void YI_ETH_MDNS_RUN(void * arg){
     while(1){
         sleep(1);
     }
+#else
+    int ret = 0;
+    /* ret = run_accept_multicast(arg); */
+    run_accept_multicast(arg);
+    run_recv_data(arg);
 #endif
 }
 
@@ -543,14 +637,32 @@ void YI_ETH_MDNS_REINIT(void * arg){
 }
 
 #ifdef BUILD_EXE
+static FILE *fp = NULL;
+#define BIND_KEY_PATH "/tmp/bind_key"
+void mdns_result(char * bind_key)
+{
+    printf("this is callback bind_key:%s\r\n",bind_key);
+    if(!fp){
+        fp = fopen(BIND_KEY_PATH,"wb+");
+    }   
+    if(fp){
+        printf("write %s into %s\r\n",bind_key,BIND_KEY_PATH);
+        fwrite(bind_key,1,strlen(bind_key),fp);
+        fclose(fp);
+    }
+}
+
 int main(int argc,char * argv[]){
-    const char * did = "A0136003WJSXBL200310";
-    const char * preude_did = "00CN0000000000000000";
+    /* const char * did = "A0136003WJSXBL200310"; */
+    /* const char * preude_did = "00CN0000000000000000"; */
     const char * ip = argv[1];
+    const char * did = argv[2];
+    const char * preude_did = argv[3];
     int HD_VER =22;
     void * context = NULL;
-    context = YI_ETH_MDNS_INIT(ip,preude_did,did,HD_VER_N10);   
+    char bind_key[32];    
+    memset(bind_key,0,32);
+    context = YI_ETH_MDNS_INIT(ip,preude_did,did,HD_VER_N10,mdns_result,bind_key);   
     YI_ETH_MDNS_RUN(context);
-
 }
 #endif

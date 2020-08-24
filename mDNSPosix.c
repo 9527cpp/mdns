@@ -94,7 +94,7 @@ static int num_pkts_rejected = 0;
 // ***************************************************************************
 // Functions
 
-int gMDNSPlatformPosixVerboseLevel = 0;
+int gMDNSPlatformPosixVerboseLevel = 1;
 
 #define PosixErrorToStatus(errNum) ((errNum) == 0 ? mStatus_NoError : mStatus_UnknownErr)
 

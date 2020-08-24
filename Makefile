@@ -1,5 +1,5 @@
-# COMPILE_PREFIX=arm-anykav200-linux-uclibcgnueabi-
-COMPILE_PREFIX=arm-openwrt-linux-muslgnueabi-
+COMPILE_PREFIX=arm-anykav200-linux-uclibcgnueabi-
+# COMPILE_PREFIX=arm-openwrt-linux-muslgnueabi-
 # COMPILE_PREFIX=
 CC=$(COMPILE_PREFIX)gcc
 AR=$(COMPILE_PREFIX)ar
@@ -13,8 +13,10 @@ CFLAGS_DEBUG = -DMDNS_DEBUGMSGS=0
 CFLAGS += $(CFLAGS_COMMON) $(CFLAGS_OS) $(CFLAGS_DEBUG) 
 
 CFLAGS += -DLINUX -I../include 
+CFLAGS += -fPIC
 
-AFLAGS += -crs
+LDFLAGS += -lpthread
+
 
 LIB = ../lib/libmdns.a
 EXE = ../exe/mdns
@@ -36,7 +38,7 @@ all:$(TGT)
 	$(CC) -c $(CFLAGS) $< -o $@
 
 $(LIB):$(OBJS)
-	$(AR) $(AFLAGS) $@ $(LDLIBS) $^
+	$(AR) rcs $@ $^
 
 $(EXE):$(OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
