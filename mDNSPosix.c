@@ -997,6 +997,7 @@ mDNSlocal int SetupInterfaceList(mDNS *const m)
                 }
             }
             i = i->ifi_next;
+            /* break; */
         }
 
         // If we found no normal interfaces but we did find a loopback interface, register the

@@ -1,4 +1,4 @@
-COMPILE_PREFIX=arm-anykav200-linux-uclibcgnueabi-
+#COMPILE_PREFIX=arm-anykav200-linux-uclibcgnueabi-
 # COMPILE_PREFIX=arm-openwrt-linux-muslgnueabi-
 # COMPILE_PREFIX=
 CC=$(COMPILE_PREFIX)gcc

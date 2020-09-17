@@ -29,18 +29,28 @@
 #include "mDNSUNP.h"        // For daemon()
 #include "yi_mdns.h"
 
-#define MDNS_PORT_NUMBER 577
+#define DEBUG_DID 1
 #define MDNS_OPEN_TIMEOUT (10*60*10) //10 min
 #define MDNS_OPEN_TIMEOUT_WHEN_BINDED (3*60*10) //3 min
 #define MDNS_DEV_BIND_TIMEOUT 90 //90 s
-
-#define MULTICAST_MAXBUF 256
+#if 1
+#define MDNS_PORT_NUMBER 577
+#define MULTICAST_MAXBUF 1024
 #define MULTICAST_PUERTO 22400
 #define MULTICAST_GRUPO "224.0.0.224"
 #define MULTICAST_YIFLAG "XIAOYI"
 #define HD_VER_N10 22
+#else
+#define MDNS_PORT_NUMBER 5353
+#define MULTICAST_MAXBUF 256
+#define MULTICAST_PUERTO 22400
+#define MULTICAST_GRUPO "224.0.0.251"
+#define MULTICAST_YIFLAG "XIAOYI"
+#define HD_VER_N10 22
+#endif
+
 /* #define IP_ADD_MEMBERSHIP 12 */
-/* #define USE_THREAD */ 
+#define USE_THREAD 
 #ifndef MIN
     #define MIN(x,y) ((x)<(y)?(x):(y))
 #endif
@@ -93,6 +103,7 @@ struct MdnsContext{
     mDNSBool gMdnsRunning;
     dns_callback gCB;
     char *bind_key;
+    char *interface;
     char pseude_did[64];
     char did[64];
     char ip[32];
@@ -244,6 +255,9 @@ static mStatus RegisterOneService(const char *  richTextName,
         printf("no memory\r\n"); 
         status = mStatus_NoMemoryErr;
     }
+
+    memset(thisServ,0,sizeof(*thisServ));
+
     if (status == mStatus_NoError) {
         MakeDomainLabelFromLiteralString(&name,  richTextName);
         MakeDomainNameFromDNSNameString(&type, serviceType);
@@ -367,10 +381,20 @@ void * run_recv_data(void * arg)
 #endif
 
     socket_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if(socket_fd < 0)goto EXIT_STAT_1;
-    if((setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on))) < 0)goto EXIT_STAT_1;
-    strcpy(ifr.ifr_name,"eth0");
-    if( setsockopt(socket_fd,SOL_SOCKET,SO_BINDTODEVICE,(char *)&ifr,sizeof(ifr))<0 ) goto EXIT_STAT_1;
+    if(socket_fd < 0)
+    {printf("1\r\n");goto EXIT_STAT_1;}
+    if((setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on))) < 0)
+    {printf("2\r\n");goto EXIT_STAT_1;}
+
+    if(strlen(context->interface) == 0)
+        strcpy(ifr.ifr_name,"eth0");
+    else
+        strcpy(ifr.ifr_name,context->interface);
+    printf("ifr_name:%s\r\n",ifr.ifr_name);
+
+    if( setsockopt(socket_fd,SOL_SOCKET,SO_BINDTODEVICE,(char *)&ifr,sizeof(ifr))<0 )
+    {printf("3\r\n");goto EXIT_STAT_1;}
+
     memset(&servaddr, 0x00, sizeof(servaddr));
     servaddr.sin_family = AF_INET;
     servaddr.sin_port = htons(MDNS_PORT_NUMBER);
@@ -413,7 +437,7 @@ void * run_recv_data(void * arg)
             goto CONTINUE_STAT_1;
         }
         int self_timeout = 0;
-        mdns_bind_state = BIND_STATE_IDLE;
+        mdns_bind_state = BIND_STATE_YES_E;
         printf("wait for bind_state\r\n");
         while(self_timeout < MDNS_DEV_BIND_TIMEOUT)
         {
@@ -470,15 +494,17 @@ CONTINUE_STAT_1:
         continue;
     }
 EXIT_STAT_1:
+    printf("exit_stat_1\r\n");
     close(socket_fd);
     socket_fd = -1;
+    printf("exit run_recv_data\r\n");
     return NULL;
 }
 
 void * run_accept_multicast(void * arg)
 {
     int ret = 1;
-    int fd, n, r;
+    int fd = -1, n, r;
     int client_sock = -1;
     struct sockaddr_in srv, cli, dst;
     struct ip_mreq mreq;
@@ -491,7 +517,9 @@ void * run_accept_multicast(void * arg)
     char send_buf[64] = {0};
     int flag_len = strlen(MULTICAST_YIFLAG);
     struct MdnsContext * context = (struct MdnsContext *)arg;
+    int nOptval = 1;
 
+    printf("1111\r\n");
 #ifdef USE_THREAD
     pthread_detach(pthread_self());
 #endif
@@ -504,9 +532,15 @@ void * run_accept_multicast(void * arg)
     srv.sin_family = AF_INET;
     srv.sin_port = htons(MULTICAST_PUERTO);
     printf("ip:%s\r\n",context->ip);
+
     if( inet_aton(MULTICAST_GRUPO, &srv.sin_addr ) < 0 ){printf("1\r\n");goto EXIT_STAT_1;}
     if( (fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0 ){printf("2\r\n");goto EXIT_STAT_1;}
-    if( bind(fd, (struct sockaddr *)&srv, sizeof(srv)) < 0 ){printf("3\r\n");goto EXIT_STAT_1;}
+
+    /* if(setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const void *)&nOptval,sizeof(int)) < 0 ){printf("7\r\n");goto EXIT_STAT_1;} */
+    /* if(setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, (const void *)&nOptval,sizeof(int)) < 0 ){printf("7\r\n");goto EXIT_STAT_1;} */
+
+    if( bind(fd, (struct sockaddr *)&srv, sizeof(srv)) < 0 ){printf("3 %d\r\n",errno);goto EXIT_STAT_1;}
+
     if (inet_aton(MULTICAST_GRUPO, &mreq.imr_multiaddr) < 0) {printf("4\r\n");goto EXIT_STAT_1;}
     if (inet_aton(context->ip, &(mreq.imr_interface)) < 0){printf("5\r\n");goto EXIT_STAT_1;}
     if(setsockopt(fd, SOL_IP, IP_ADD_MEMBERSHIP, &mreq,sizeof(mreq)) < 0 ){printf("6\r\n");goto EXIT_STAT_1;}
@@ -517,8 +551,12 @@ void * run_accept_multicast(void * arg)
     {
         /// 1: recv
         memset(buf, 0, MULTICAST_MAXBUF);
+        printf("begin recv\r\n");
         if( (r = recvfrom(fd, buf, MULTICAST_MAXBUF, 0, (struct sockaddr *)&cli, (socklen_t*)&n)) < 0 )goto CONTINUE_STAT_2;;
-        printf( "from %s: %s\r\n", inet_ntoa(cli.sin_addr), buf);
+
+///// this is a bug
+        /* printf( "from %s: %s\r\n", inet_ntoa(cli.sin_addr), buf); */
+        printf("123\r\n");
         if(0 != strncmp(buf, MULTICAST_YIFLAG, flag_len))goto CONTINUE_STAT_2;
         memset(decode_str, 0, MULTICAST_MAXBUF);
         decode_len = base64_decode(buf+flag_len, decode_str);
@@ -565,10 +603,40 @@ EXIT_STAT_1:
     close(fd);    
     fd = -1;
     /* return ret; */
+    printf("exit run_accept_multicast\r\n");
     return NULL;
 }
 
-void *YI_ETH_MDNS_INIT(const char * ip,const char * pseude_did,const char * did,int HD_VER,dns_callback cb,char * bind_key)
+void * run_dispatch_mdns(void * arg){
+    struct timeval timeout;
+    fd_set readfds;
+    int nfds = 0;
+    int result = -1;
+    struct MdnsContext * context = (struct MdnsContext *)arg;
+#ifdef USE_THREAD
+    pthread_detach(pthread_self());
+#endif
+    while(context->gMdnsRunning)
+    {
+        FD_ZERO(&readfds);
+        timeout.tv_sec = FutureTime;
+        timeout.tv_usec = 0;
+        mDNSPosixGetFDSet(&mDNSStorage, &nfds, &readfds, &timeout);
+        result = select(nfds, &readfds, NULL, NULL, &timeout);
+        if (result < 0)
+        {
+            printf("select() returned %d err(%d):%s\r\n", result, errno, strerror(errno));
+        }
+        else
+        {
+            mDNSPosixProcessFDSet(&mDNSStorage, &readfds);
+        }
+    }
+    printf("exit run_dispatch_mdns\r\n");
+    return NULL;
+}
+
+void *YI_ETH_MDNS_INIT(const char * ip,const char * pseude_did,const char * did,int HD_VER,dns_callback cb,char * bind_key,char * interface)
 {
 
     struct MdnsContext * context = NULL;
@@ -585,6 +653,7 @@ void *YI_ETH_MDNS_INIT(const char * ip,const char * pseude_did,const char * did,
     xor_encrypt(did, sizeof(serviceName_xor), serviceName_xor);
     base64_encode(serviceName_xor, serviceName+2, strlen(did));
     snprintf(serviceType, sizeof(serviceType)-1, "_yigateway%03d._tcp.", HD_VER);
+
     status = mDNS_Init(&mDNSStorage, &PlatformStorage, mDNS_Init_NoCache, mDNS_Init_ZeroCacheSize, 
                         mDNS_Init_AdvertiseLocalAddresses, mDNS_Init_NoInitCallback, mDNS_Init_NoInitCallbackContext);
 
@@ -603,12 +672,14 @@ void *YI_ETH_MDNS_INIT(const char * ip,const char * pseude_did,const char * did,
         goto EXIT;
     }
 
+    printf("register success\r\n");
     context->gMdnsRunning = 1;
     memcpy(context->pseude_did,pseude_did,strlen(pseude_did));
     memcpy(context->did,did,strlen(did));
     memcpy(context->ip,ip,strlen(ip));
     context->gCB = cb;
     context->bind_key = bind_key;
+    context->interface = interface;
 EXIT:
     printf("YI_ETH_MDNS_INIT ok\r\n");
     return context;
@@ -617,12 +688,17 @@ EXIT:
 void YI_ETH_MDNS_RUN(void * arg){
 #ifdef USE_THREAD
     pthread_t multicast_t;
+    pthread_t dispatch_mdns_t;
     pthread_t recv_t;
     pthread_create(&recv_t,NULL,run_recv_data,arg);
     pthread_create(&multicast_t,NULL,run_accept_multicast,arg);
-    while(1){
+    //  app must need  android don't need
+    pthread_create(&dispatch_mdns_t,NULL,run_dispatch_mdns,arg);
+    struct MdnsContext * context = (struct MdnsContext *)arg;
+    do{
         sleep(1);
-    }
+    }while(context->gMdnsRunning);
+    
 #else
     int ret = 0;
     /* ret = run_accept_multicast(arg); */
@@ -652,17 +728,29 @@ void mdns_result(char * bind_key)
     }
 }
 
+
 int main(int argc,char * argv[]){
-    /* const char * did = "A0136003WJSXBL200310"; */
-    /* const char * preude_did = "00CN0000000000000000"; */
-    const char * ip = argv[1];
-    const char * did = argv[2];
-    const char * preude_did = argv[3];
     int HD_VER =22;
     void * context = NULL;
     char bind_key[32];    
+    char interface[16];
+    const char * ip = argv[1];
+    memset(interface,0,16);
     memset(bind_key,0,32);
-    context = YI_ETH_MDNS_INIT(ip,preude_did,did,HD_VER_N10,mdns_result,bind_key);   
+#if DEBUG_DID
+    /* const char * did = "BFUSY59HGERRP3200828"; */
+    const char * did = "A0136003WIM4WH200310";
+    const char * preude_did = "00CN0000000000000000";
+    if(argc >=3)
+        memcpy(interface,argv[2],strlen(argv[2]));
+#else
+    const char * did = argv[2];
+    const char * preude_did = argv[3];
+    if(argc >=5)
+        memcpy(interface,argv[4],strlen(argv[4]));
+#endif
+    context = YI_ETH_MDNS_INIT(ip,preude_did,did,HD_VER_N10,mdns_result,bind_key,interface);   
     YI_ETH_MDNS_RUN(context);
+    printf("exit mdns main\r\n");
 }
 #endif
